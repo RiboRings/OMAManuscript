@@ -1120,112 +1120,140 @@ collections.
 
 **Other methods and programming environments.** Several other methods and workflows have been employed in microbiome data science. In general, mia supports a flexible statistical programming framework. Thus, it can be used to incorporate more specialized microbiome analysis workflows such as SIAMCAT for association testing [@wirbel2021] or mikropml for machine-learning based prediction and classification [@topcuoglu2021], network analysis [@peschel2021], and microbe-set enrichment analysis [@kou2020; @pham2025]. These tools operate primarily on a single feature matrix, however, and lack the multi-omic feature selection offered by dedicated integration methods discussed in the previous section. The adoption of interoperable containers and shared methodology between related fields can significantly expand the transfer of existing toolkits to adjacent or emerging disciplines. Importantly, our framework can also be linked to external microbiome data analysis pipelines using tools such as bioBakery [@beghini2021], and foreign platforms through language-specific interfaces, namely Rcpp for C++, reticulate for Python, and JuliaCall for Julia. These connections allow users to combine the most suitable tools across multiple frameworks, while ensuring cross-language interoperability of structured data through standard containers such as (Tree)SE and MAE. The overall data analytical paradigm of Bioconductor is similar to that of scikit-bio [@aton2026], a Python-based ecosystem. Whereas scikit-bio benefits from the rapidly evolving machine learning and artificial intelligence tools in Python, Bioconductor’s strengths lie in its vast statistical ecosystem and interoperability with dedicated omics research tools. We anticipate that the ongoing developments in cross-language integration will further lower the barriers for cross-utilizing tools across complementary environments.
 
-
-
-
-
 ```{r}
 #| label: downstream_analyses
-#| eval: false
 #| echo: false
 #| message: false
+#| warning: false
 
-# Load packages
-pkgs <- c("maaslin3", "mia", "miaTime", "microbiomeDataSets")
+# Configure Java for IntegratedLearner before loading the required packages
+options(java.parameters = c("-Xmx6G", "--add-modules=jdk.incubator.vector"))
+
+
+# Load required packages
+pkgs <- c("IntegratedLearner", "maaslin3", "mia", "scater")
 
 temp <- sapply(pkgs, function(x) {
     suppressMessages(require(x, character.only = TRUE))
 })
 
-# Load data
-tse <- SprockettTHData()
+# Helper for catching all printing from Maaslin3 and IL
+quiet <- function(x) {
+    invisible(capture.output(x))
+    return(x)
+}
 
-# Subset by taking only fecal samples from infants
-tse <- tse[, tse$Sample_Type == "Feces" & tse$Age_Class == "Infant"]
+# Load example multi-omics dataset
+data("HintikkaXOData")
+mae <- HintikkaXOData
 
-# Agglomerate by phylum, family and genus
-tse <- agglomerateByRanks(tse, ranks = c("Phylum", "Family", "Genus"))
-
-# Apply relative abundance transformation
-tse <- transformAssay(tse, method = "relabundance", altexp = altExpNames(tse))
-
-# Apply CLR transformation
-tse <- transformAssay(
-    tse,
-    method = "clr", pseudocount = TRUE, altexp = altExpNames(tse)
+# Attach sample metadata and perform basic preprocessing
+mae[[1]] <- getWithColData(mae, 1)
+mae[[2]] <- getWithColData(mae, 2)
+assay(mae[[2]], "nmr")[is.na(assay(mae[[2]], "nmr"))] <- 0
+rowData(mae[[1]]) <- apply(
+    rowData(mae[[1]]),
+    2,
+    function(x) gsub("D_[1-6]__", "", x)
 )
 
-# Apply z-score transformation
-tse <- transformAssay(
-    tse,
-    MARGIN = "rows",
-    method = "standardize",
-    assay.type = "clr",
-    altexp = altExpNames(tse),
-    name = "z"
+# Construct genus-level data and phylogenetic trees
+mae[[1]] <- agglomerateByRanks(mae[[1]])
+altExp(mae[[1]], "prev_genus") <- subsetByPrevalent(
+    mae[[1]],
+    assay.type = "counts",
+    rank = "Genus",
+    prevalence = 1,
+    include.lowest = TRUE,
+    detection = 1
+)
+mae[[1]] <- swapAltExp(mae[[1]], "Genus", "main")
+mae[[1]] <- addHierarchyTree(mae[[1]])
+altExp(mae[[1]], "prev_genus") <- addHierarchyTree(altExp(mae[[1]], "prev_genus"))
+rowTree(altExp(mae[[1]], "prev_genus"))[["tip.label"]] <-
+    gsub("Genus:", "", rowTree(altExp(mae[[1]], "prev_genus"))[["tip.label"]])
+
+# Compute feature abundance summaries for tree visualization
+altExp(mae[[1]], "prev_genus") <- addPerFeatureQC(
+    altExp(mae[[1]], "prev_genus")
+)
+rowData(altExp(mae[[1]], "prev_genus"))[["log(mean abundance)"]] <-
+    log(rowData(altExp(mae[[1]], "prev_genus"))[["mean"]])
+
+# Generate transformed assays for downstream analyses
+mae[[1]] <- transformAssay(
+    mae[[1]],
+    assay.type = "counts",
+    method = "relabundance",
+    altexp = altExpNames(mae[[1]])
+)
+mae[[1]] <- transformAssay(
+    mae[[1]],
+    assay.type = "counts",
+    method = "rclr",
+    altexp = altExpNames(mae[[1]])
+)
+mae[[1]] <- transformAssay(
+    mae[[1]],
+    assay.type = "counts",
+    method = "rclr",
+    impute = FALSE,
+    name = "rclr_non_imputed",
+    altexp = altExpNames(mae[[1]])
+)
+mae[[2]] <- transformAssay(
+    mae[[2]],
+    assay.type = "nmr",
+    method = "log10",
+    pseudocount = TRUE
 )
 
-# Calculate alpha diversity
-tse <- addAlpha(tse, index = "faith")
-
-# Perform PCoA
-tse <- addMDS(tse, assay.type = "counts", method = "unifrac", niter = 10L)
-
-# Perform dbRDA
-tse <- addRDA(
-    tse,
-    assay.type = "clr",
-    method = "euclidean",
-    formula = x ~ Age_Months + Country,
+# Compute alpha diversity and ordination analyses
+mae[[1]] <- addAlpha(mae[[1]], assay.type = "counts", index = "faith")
+mae[[1]] <- addDissimilarity(
+    mae[[1]],
+    assay.type = "counts",
+    method = "unifrac"
+)
+mae[[1]] <- addRDA(
+    mae[[1]],
+    dis.name = "unifrac",
+    formula = x ~ Fat + XOS,
     na.action = na.exclude
 )
 
-# Remove the RDA object as it takes a lot of space
-attr(reducedDim(tse, "RDA"), "obj") <- NULL
+# Perform differential abundance analysis with MaAsLin3
+maaslin3_out <- maaslin3(
+    input_data = mae[[1]],
+    output = "maaslin_results",
+    formula = "~ Fat + XOS"
+) |> quiet()
 
-# Calculate time divergence
-tse <- addStepwiseDivergence(
-    tse,
-    time.col = "Age_Months",
-    group = "Subject_ID",
-    method = "bray",
-    tree = rowTree(tse)
+maaslin3_res <- maaslin3_out[["fit_data_prevalence"]][["results"]]
+maaslin3_res <- maaslin3_res[!is.na(maaslin3_res[["coef"]]), ]
+maaslin3_res <- maaslin3_res[
+    order(maaslin3_res[["qval_joint"]]),
+]
+maaslin3_res <- maaslin3_res[
+    maaslin3_res[["qval_joint"]] < 0.05,
+]
+
+# Compute Joint-RPCA embedding across microbiome and metabolomics data
+mae <- addJointRPCA(
+    mae,
+    experiments = c(1, 2),
+    assay.types = c("rclr_non_imputed", "log10")
 )
 
-altExp(tse, "prev_genus") <- subsetByPrevalent(
-    altExp(tse, "Genus"),
-    prevalence = 0.5,
-    detection = 0.001,
-    tree = rowTree(tse)
-)
-
-tse <- swapAltExp(tse, "prev_genus", saved = "main")
-
-rownames(tse) <- gsub("/| ", "_", rownames(tse))
-
-# Perform DAA
-res_full <- maaslin3(
-    input_data = tse,
-    output = "DAA_example",
-    formula = "~ Age_Months + Sex + Country",
-    normalization = "TSS",
-    transform = "LOG",
-    verbosity = "ERROR"
-)
-
-# Extract DAA results
-res <- res_full$fit_data_abundance$results
-res <- res[res$value == "Age_Months", ]
-
-# Add abundance results to rowData
-rownames(res) <- res$feature
-tax_order <- match(rownames(tse), rownames(res))
-rowData(tse) <- cbind(rowData(tse), res[tax_order, ])
-
-tse <- swapAltExp(tse, "main", saved = "prev_genus")
-
-# Save object to use it in visualization step without running analyses
-saveRDS(tse, file.path("data", "tse.rds"))
+# Train an IntegratedLearner model for feature importance visualization
+model <- IntegratedLearner(
+    MAE_train = mae,
+    experiment = c("microbiota", "metabolites"),
+    assay.type = c("counts", "nmr"),
+    outcome_col = "Fat",
+    subject_id_col = "Sample",
+    family = binomial()
+) |> quiet()
 ```
 
 ```{r}
@@ -1233,178 +1261,250 @@ saveRDS(tse, file.path("data", "tse.rds"))
 #| echo: false
 #| message: false
 #| warning: false
-#| fig-cap: "**Common visualization methods for microbiome data.** The selected
-#|   visualizations demonstrate how the miaViz and scater packages effectively
-#|   display various aspects of microbiome data, using the SprockettTHData time
-#|   series dataset openly available via microbiomeDataSets (Bioconductor package).
-#|   This dataset consists of longitudinal 16S rRNA gut microbiome data from
-#|   infant fecal samples collected in Finland, Bangladesh, and Bolivia
-#|   [@sprockett2020; @subramanian2014; @vatanen2016]. **a**, Phylogenetic
-#|   relationships. **b**, Phyla abundances of the samples ordered by age,
-#|   stratified by country and gender. Actinobacteria is more abundant in
-#|   Bolivia and Bangladesh compared to Finland.  **c&ndash;d**,
-#|   Multidimensional scaling using UniFrac distances and distance-based
-#|   Redundancy Analysis (dbRDA) based on Aitchison distance, respectively. Both
-#|   ordination methods shows clear pattern separating microbial profiles in
-#|   different countries. dbRDA shows an additional association between
-#|   microbial profile and age. **e&ndash;f**, Faith's phylogenetic diversity by
-#|   country and age respectively. **g**, Differential Abundance Analysis (DAA)
-#|   results. Two genera exhibit an association with age. **h**, UniFrac
-#|   divergence between consecutive time points. Results indicate slow
-#|   stabilization of microbial communities."
-#| fig-width: 19
-#| fig-height: 10
+#| fig-cap: "**Selected single-omic and multi-omic visualizations for microbiome data.** The figure demonstrates visualization workflows available in the ecosystem using the openly available multi-omics mouse dataset distributed through the mia package [@hintikka2021]. The dataset contains microbiota (16S rRNA) and metabolomics measurements from mice receiving either a high-fat or low-fat diet, with or without xylooligosaccharide (XOS) supplementation. **a**, Taxonomic relationships among bacterial genera represented as a tree. Most genera belong to the phylum *Firmicutes*, while *Alistipes* and *Parabacteroides* have the highest mean abundances. **Single-omic analyses (b–d)** demonstrate common analyses of individual microbiome data layers. **b**, Faith's phylogenetic diversity [@armstrong2021] summarizes within-sample microbial diversity and shows no clear difference between diet groups. **c**, Distance-based redundancy analysis (dbRDA) based on UniFrac distances [@lozupone2005] visualizes differences in microbial community composition explained by the experimental variables, revealing separation according to diet. **d**, Differential prevalence analysis performed with MaAsLin3 [@nickols2026] identifies bacterial genera whose prevalence differs significantly between diet groups (adjusted *P* < 0.05). **Multi-omic analyses (e–f)** integrate microbiota and metabolomics data. **e**, Joint-RPCA provides an unsupervised low-dimensional representation of the combined microbiota and metabolomics data. The five strongest loading vectors from each data layer indicate the features contributing most to the displayed ordination axes. Vectors pointing in similar directions indicate positively associated features, whereas vectors pointing in opposite directions indicate negative associations. **f**, Signed feature importances from an IntegratedLearner model quantify the contribution of individual microbiota and metabolite features to supervised prediction of dietary group, indicating that metabolite features are generally more predictive than microbiota features, with glucose identified as the most important predictor."
+#| fig-width: 20
+#| fig-height: 15
 
-# Load packages
-pkgs <- c("miaViz", "patchwork", "scater")
+pkgs <- c("dplyr", "ggtree", "grid", "miaViz", "patchwork")
+
 temp <- sapply(pkgs, function(x) {
     suppressMessages(require(x, character.only = TRUE))
 })
 
-# Load data
-file_path <- file.path("data", "tse.rds")
-if (!file.exists(file_path)) {
-    stop("Run manually the chunk above. '", file_path, "' cannot be found.")
-}
-tse <- readRDS(file_path)
+pkgs <- c("dplyr", "ggtree", "miaViz", "patchwork")
 
-# Get phylum names
-phylum_names <- sort(unique(rowData(altExp(tse, "Phylum"))[, "Phylum"]))
-# Named vector of phylum colors
-phylum_colors <- setNames(
-    scater:::.get_palette("tableau20")[seq_along(phylum_names)],
-    phylum_names
+temp <- sapply(pkgs, function(x) {
+    suppressMessages(require(x, character.only = TRUE))
+})
+
+# Create individual panels -----------------------------------------------------
+
+# Phylogenetic tree coloured by phylum and mean abundance
+p_tree <- plotRowTree(
+    altExp(mae[[1]], "prev_genus"),
+    edge.colour.by = "Phylum",
+    show.label = rowTree(altExp(mae[[1]], "prev_genus"))$tip.label,
+    tip.colour.by = "log(mean abundance)",
+    label.font.size = 2
 )
 
-# Define a font size
-title_size <- 16
-text_size <- 12
+# Alpha diversity
+p_alpha <- plotBoxplot(
+    mae[[1]],
+    col.var = "faith", x = "Fat", colour.by = "Fat"
+)
 
-# Visualize phylogeny
-p_tree <- plotRowTree(
-    altExp(tse, "Family"),
-    edge.colour.by = "Phylum", layout = "ape"
-) +
-    scale_color_manual(values = phylum_colors) + # Manually set colors
-    guides(color = "none")
+# Distance-based redundancy analysis
+p_rda <- plotRDA(
+    mae[[1]], "RDA",
+    colour.by = "Fat", fill.by = "Fat",
+    add.ellipse = TRUE,
+    add.significance = FALSE,
+    add.expl.var = TRUE
+)
 
-# Visualize abundances with barplot
-p_bar <- plotAbundance(
-    altExp(tse, "Phylum"),
-    assay.type = "relabundance",
-    col.var = c("Country", "Sex"), ncol = 3, facet.cols = TRUE, scales = "free_x",
-    order.col.by = "Age_Months"
-) +
-    guides(fill = guide_legend(title = "Phylum")) +
-    scale_color_manual(values = phylum_colors) +
-    theme(
-        axis.title.y = element_text(size = title_size),
-        axis.text.y = element_text(size = text_size)
-    )
+# Differential abundance results
+p_forest <- plotForest(
+    maaslin3_res,
+    effect.var = "coef",
+    err.var = "stderr",
+    pval.var = "qval_joint",
+    id.var = "feature",
+    label.by = c("CI", "P-Value"),
+    order.by = "coef"
+)
 
-# Visualize alpha diversity
-p_alpha <- plotColData(
-    tse,
-    y = "faith", x = "Country", colour_by = "Country",
-    show_boxplot = TRUE, show_violin = FALSE, point_alpha = 0.2
-) +
-    labs(y = "Faith", x = "Country") +
-    theme(
-        legend.position = "none",
-        axis.title.x = element_text(size = title_size),
-        axis.title.y = element_text(size = title_size),
-        axis.text.x = element_text(size = text_size, angle = 20, hjust = 0.6, vjust = 0.8),
-        axis.text.y = element_text(size = text_size)
-    )
+# Joint-RPCA ordination
+p_joint_rpca <- plotJointRPCA(
+    mae, "JointRPCA",
+    colour.by = "Fat",
+    fill.by = "Fat",
+    add.ellipse = TRUE,
+    ntop = 5,
+    add.expl.var = TRUE,
+    label.size = 2
+)
 
-p_alpha2 <- plotColData(
-    tse,
-    y = "faith", x = "Age_Months", colour_by = "Country"
-) +
-    geom_smooth(method = "lm") +
-    labs(y = "Faith", x = "Age in months") +
-    theme(
-        axis.title.x = element_text(size = title_size),
-        axis.title.y = element_text(size = title_size),
-        axis.text.x = element_text(size = text_size),
-        axis.text.y = element_text(size = text_size)
-    )
+# Prepare feature importance data ----------------------------------------------
 
-# Visualize PCoA
-p_mds <- plotMDS(tse, colour_by = "Country") +
+df <- bind_rows(
+    lapply(names(model[["feature_importance_signed_by_layer"]]), function(layer) {
+        x <- model[["feature_importance_signed_by_layer"]][[layer]]
+        data.frame(
+            Layer = layer,
+            Feature = names(x),
+            Effect = unname(x)
+        )
+    })
+)
+
+# Keep the strongest positive and negative feature associations
+df <- df |>
+    mutate(
+        Magnitude = abs(Effect),
+        Direction = ifelse(Effect >= 0, "Positive", "Negative")
+    ) |>
+    group_by(Layer) |>
+    slice_max(Magnitude, n = 20, with_ties = FALSE) |>
+    arrange(Layer, desc(Magnitude)) |>
+    mutate(Feature = factor(Feature, levels = Feature)) |>
+    ungroup()
+
+# Feature importance lollipop plot
+p_feature_importances <-
+    ggplot(df, aes(Magnitude, Feature, colour = Direction)) +
+    geom_segment(
+        aes(x = 0, xend = Magnitude, yend = Feature),
+        linewidth = 0.8
+    ) +
+    geom_point(size = 2) +
+    facet_wrap(~Layer, scales = "free") +
+    scale_colour_manual(values = c(
+        Positive = "firebrick3",
+        Negative = "steelblue3"
+    )) +
+    scale_x_log10() +
+    labs(
+        x = "Feature importance",
+        y = NULL,
+        colour = "Association"
+    ) +
+    theme_bw()
+
+# Harmonize the appearance of all panels ---------------------------------------
+
+common_theme <- theme(
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 9),
+    strip.text = element_text(size = 10),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    plot.title = element_text(size = 11),
+    plot.margin = margin(5.5, 5.5, 5.5, 5.5)
+)
+
+p_alpha <- p_alpha + common_theme
+p_forest <- p_forest + common_theme
+p_rda <- p_rda + common_theme
+
+# Place the linetype legend inside the Joint-RPCA panel
+p_joint_rpca <- p_joint_rpca +
+    common_theme +
     theme(
         legend.position = "inside",
-        legend.justification = c("right", "top"),
-        axis.title.x = element_text(size = title_size),
-        axis.title.y = element_text(size = title_size),
-        axis.text.x = element_text(size = text_size),
-        axis.text.y = element_text(size = text_size),
-        legend.title = element_text(size = title_size),
-        legend.text = element_text(size = text_size)
+        legend.position.inside = c(0.98, 0.02),
+        legend.justification = c(1, 0),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        legend.key = element_blank()
     )
 
-# Visualize dbRDA
-p_rda <- plotRDA(tse, "RDA", colour.by = "Country", add.significance = FALSE) +
-    theme(
-        legend.position = "none",
-        axis.title.x = element_text(size = title_size),
-        axis.title.y = element_text(size = title_size),
-        axis.text.x = element_text(size = text_size),
-        axis.text.y = element_text(size = text_size)
+p_tree <- p_tree + common_theme
+p_feature_importances <- p_feature_importances + common_theme
+
+# Fine-tune individual panels --------------------------------------------------
+
+# Reduce tree width and move legends inside the panel
+p_tree <- p_tree +
+    xlim_tree(1) +
+    guides(
+        fill = guide_colorbar(
+            position = "inside",
+            title.position = "top",
+            theme = theme(
+                legend.position.inside = c(1.5, 0.5),
+                legend.justification = c(0, 1)
+            ),
+            barheight = unit(2.5, "cm"),
+            barwidth = unit(0.4, "cm")
+        ),
+        colour = guide_legend(
+            position = "inside",
+            title.position = "top",
+            theme = theme(
+                legend.position.inside = c(1.5, 0.5),
+                legend.justification = c(0, 1)
+            )
+        )
     )
 
-tse_sub <- tse[, !is.na(tse$time_diff) & tse$time_diff >= 0.8 & tse$time_diff <= 1.2]
+# Remove redundant legends and harmonize axis labels
+p_alpha <- p_alpha +
+    labs(y = "Faith", x = "Fat") +
+    guides(colour = "none", fill = "none")
 
-# Visualize divergence
-p_divergence <- plotColData(tse_sub, y = "divergence", x = "Age_Months") +
-    geom_smooth(method = "lm") +
-    labs(x = "Age in months", y = expression(Delta ~ "UniFrac" ~ "(N, N-1)")) +
-    theme(
-        legend.position = "none",
-        axis.title.x = element_text(size = title_size),
-        axis.title.y = element_text(size = title_size),
-        axis.text.x = element_text(size = text_size),
-        axis.text.y = element_text(size = text_size)
+p_rda <- p_rda +
+    guides(colour = "none", fill = "none") +
+    theme(aspect.ratio = 1 / 2)
+
+p_joint_rpca <- p_joint_rpca +
+    guides(colour = "none", fill = "none") +
+    theme(aspect.ratio = 1 / 2)
+
+p_forest <- p_forest[[1]]
+p_forest <- p_forest +
+    labs(
+        x = "Association with high-fat diet (log-odds)",
+        y = ""
     )
 
-tse <- swapAltExp(tse, "prev_genus", saved = "main")
+# Add panel labels -------------------------------------------------------------
+# We have to add tags manually because when using patchwork::plot_annotation(),
+# they would be added also to titles.
 
-# p_forest <- plotForest(
-#    tse,
-#    effect.var = "coef",
-#    err.var = "stderr",
-#    pval.var = "qval_individual",
-#    label.by = c("CI", "P-Value")
-# )
+tag_theme <- theme(
+    plot.tag = element_text(face = "bold", size = 15),
+    plot.tag.position = c(0.01, 0.99)
+)
 
-# Visualize abundances vs age
-p_daa <- plotExpression(
-    tse,
-    features = rownames(tse)[rowData(tse)$qval_individual < 0.05],
-    assay.type = "relabundance", x = "Age_Months"
-) +
-    scale_y_log10() +
-    geom_smooth() +
-    labs(x = "Age in months", y = "Relative abundance") +
-    theme(
-        axis.title.x = element_text(size = title_size),
-        axis.title.y = element_text(size = title_size),
-        axis.text.x = element_text(size = text_size),
-        axis.text.y = element_text(size = text_size)
+p_tree <- p_tree + labs(tag = "a") + tag_theme
+p_alpha <- p_alpha + labs(tag = "b") + tag_theme
+p_rda <- p_rda + labs(tag = "c") + tag_theme
+p_forest <- p_forest + labs(tag = "d") + tag_theme
+p_joint_rpca <- p_joint_rpca + labs(tag = "e") + tag_theme
+p_feature_importances <- p_feature_importances + labs(tag = "f") + tag_theme
+
+# Assemble the figure ----------------------------------------------------------
+
+panel_single_omic <-
+    (p_alpha + p_rda + p_forest +
+         plot_layout(widths = c(1, 1, 1))) +
+    plot_annotation(title = "Single-omics")
+
+panel_multi_omics <-
+    (p_joint_rpca + p_feature_importances +
+         plot_layout(widths = c(1, 2))) +
+    plot_annotation(title = "Multi-omics")
+
+# Standalone section headers
+title_single <- wrap_elements(
+    full = textGrob(
+        "Single-omics",
+        x = 0,
+        hjust = 0,
+        gp = gpar(fontface = "bold", fontsize = 13)
     )
+)
 
-# Combine plots
-p1 <- (p_tree / p_bar) +
-    plot_layout(guides = "collect")
-p2 <- (p_mds / p_rda) +
-    plot_layout(heights = c(1, 1))
-p3 <- ((p_alpha | p_alpha2) / p_daa / p_divergence) +
-    plot_layout(heights = c(1, 1, 1))
-p <- (p1 | p2 | p3) +
-    plot_layout(widths = c(0.33, 0.4, 0.32)) +
-    plot_annotation(tag_levels = "a") &
-    theme(plot.tag = element_text(size = 22, face = "bold"))
-p
+title_multi <- wrap_elements(
+    full = textGrob(
+        "Multi-omics",
+        x = 0,
+        hjust = 0,
+        gp = gpar(fontface = "bold", fontsize = 13)
+    )
+)
+
+# Combine all panels into the final figure
+final <-
+    p_tree /
+    title_single /
+    panel_single_omic /
+    title_multi /
+    panel_multi_omics +
+    plot_layout(heights = c(3, 0.08, 1, 0.08, 1))
+
+final
 ```
 
 # Accessible analysis and community {#sec-community}
