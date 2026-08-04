@@ -1624,8 +1624,7 @@ control (*e.g.* peer-review, unit testing, and continuous integration),
 usability (APIs), robustness (dependency testing and deprecation mechanisms),
 and a biannual release cycle with semantic versioning. Over the past two decades
 Bioconductor has grown into a repository of more than 2,300 actively maintained
-software packages, of which `r sum(pkgs$Field == "Microbiome")` are now
-classified under the _Microbiome_ Task View. At the core of the Bioconductor's
+software packages, of which `r sum(pkgs$Field == "Microbiome")` are classified as microbiome-related based on their BiocViews annotations. At the core of the Bioconductor's
 data science strategy has been the idea of shared data representations
 [@gentleman2004; @lawrence2013]. This has enhanced interoperability, mitigated
 redundant efforts and facilitated the translation of methods between research
