@@ -492,15 +492,9 @@ automatically resolves the intersection of available samples and ensures
 consistent alignment across all modalities. Such structured handling of
 sample relationships is particularly important for integrative methods,
 as it reduces the risk of sample mismatches, a common source of
-irreproducibility in ad hoc multi-table analyses. For instance, diagonal
-integration methods \citep{xu2022}---where shared features across data
-types may not be explicitly defined---can benefit from such a systematic
-framework that enforces anchor alignment. This reflects lessons learned
-from single-cell data integration, where shared anchors and hierarchical
-mapping have proven essential for interpretability. To summarize,
-flexible mapping of samples across several data objects is key for
-efficient data integration, method sharing, and overall
-interoperability.
+irreproducibility in ad hoc multi-table analyses. To summarize, flexible
+mapping of samples across several data objects is key for efficient data
+integration, method sharing, and overall interoperability.
 
 \begin{longtable}[]{@{}
   >{\raggedright\arraybackslash}p{(\columnwidth - 8\tabcolsep) * \real{0.1800}}
@@ -630,7 +624,6 @@ MGnify database. HMP, Human Microbiome Project.
 \section{Alternative frameworks}\label{sec-data_frameworks}
 
 Several alternative frameworks to microbiome analysis are available.
-
 Within Bioconductor, phyloseq \citep{mcmurdie2012} provides widely
 adopted tools with a primary focus on 16S amplicon data analysis.
 (Tree)SE accommodates all core components of phyloseq objects, including
@@ -669,7 +662,7 @@ gains for the (Tree)SE framework over alternatives
 allocated memory as feature and sample sizes increase. It is applicable
 to abundance matrices of up to 100,000 samples and 10,000 features on a
 standard laptop, except the heaviest operations such as phylogenetic
-beta diversity (Unifrac) calculation, where the general break point is
+beta diversity (UniFrac) calculation, where the general break point is
 reached around 10,000 samples with all methods. At a feature set size of
 10,000 the break point is additionally reached for PhILR transformation
 and melting operation. At smaller sample sizes phyloseq or its
@@ -896,7 +889,7 @@ BiocParallel can support operations that decompose into independent
 blocks by samples, features, or other data elements. Non-decomposable
 operations, such as distance matrices and ordinations, must be realized
 in memory or parallelized by a dedicated algorithm (as in \emph{e.g.}
-striped Unifrac \citep{mcdonald2018}).
+striped UniFrac \citep{mcdonald2018}).
 
 The following sections provide an overview of some of the currently
 available tools, encompassing standard methods for taxonomic and other
